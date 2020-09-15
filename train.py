@@ -2,6 +2,7 @@ import argparse
 import logging
 import math
 import os
+# os.environ["CUDA_VISIBLE_DEVICES"]='0'
 import random
 import shutil
 import time
@@ -21,6 +22,7 @@ from tqdm import tqdm
 
 import test  # import test.py to get mAP after each epoch
 from models.yolo import Model
+from models.yolo_nas import Model as NasModel
 from utils.datasets import create_dataloader
 from utils.general import (
     torch_distributed_zero_first, labels_to_class_weights, plot_labels, check_anchors, labels_to_image_weights,
@@ -74,7 +76,12 @@ def train(hyp, opt, device, tb_writer=None):
         model.load_state_dict(state_dict, strict=False)  # load
         logger.info('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
-        model = Model(opt.cfg, ch=3, nc=nc).to(device)  # create
+        if opt.nas:
+            model = NasModel(opt.cfg, ch=3, nc=nc, nas=opt.nas, nas_stage=opt.nas_stage).to(device)  # create
+            if opt.nas_stage == 3:
+                model.re_organize_middle_weights()
+        else:
+            model = Model(opt.cfg, ch=3, nc=nc, nas=opt.nas).to(device)  # create
 
     # Freeze
     freeze = ['', ]  # parameter names to freeze (full or partial)
@@ -380,9 +387,9 @@ def train(hyp, opt, device, tb_writer=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='yolov5s.pt', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='', help='model.yaml path')
-    parser.add_argument('--data', type=str, default='data/coco128.yaml', help='data.yaml path')
+    parser.add_argument('--weights', type=str, default='', help='initial weights path')
+    parser.add_argument('--cfg', type=str, default='models/yolov5s-roborock.yaml', help='model.yaml path')
+    parser.add_argument('--data', type=str, default='data/baiguang.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='', help='hyperparameters path, i.e. data/hyp.scratch.yaml')
     parser.add_argument('--epochs', type=int, default=300)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
@@ -396,7 +403,7 @@ if __name__ == '__main__':
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
     parser.add_argument('--cache-images', action='store_true', help='cache images for faster training')
     parser.add_argument('--name', default='', help='renames results.txt to results_name.txt if supplied')
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
     parser.add_argument('--single-cls', action='store_true', help='train as single-class dataset')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
@@ -404,6 +411,9 @@ if __name__ == '__main__':
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--logdir', type=str, default='runs/', help='logging directory')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
+
+    parser.add_argument('--nas', action='store_true', help='neural architecture search')
+    parser.add_argument('--nas-stage', type=int, default=1, help='1: +kernel, 2: +depth, 3: +width')
     opt = parser.parse_args()
 
     # Set DDP variables

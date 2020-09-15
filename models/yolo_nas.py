@@ -58,10 +58,45 @@ class Detect(nn.Module):
         yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
         return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
 
+class baseModel(nn.Module):
+    def __init__(self, backbone, neck, head1, head2, head3):
+        self.backbone = backbone
+        self.neck = neck
+        self.head1 = head1
+        self.head2 = head2
+        self.head3 = head3
+
+    def forward(self, x):
+        x = self.backbone(x)
+        x = self.neck(x)
+        h1 = self.head1(x)
+        h2 = self.head2(x)
+        h3 = self.head3(x)
+        return (h1,h2,h3)
+
+def sample_kernel(m):
+    if isinstance(m, ElasticConv):
+        # print('===>', 'sampling ElasticConv')
+        m.active_kernel_size = random.choice(m.kernel_size_list)
+    elif isinstance(m, ElasticBottleneck):
+        # print('===>', 'samping ElasticBottleneck')
+        m.cv2.active_kernel_size = random.choice(m.cv2.kernel_size_list)
+    else:
+        pass
+        # print(type(m), " doesn't support dynamic kernel!")
+        # raise Exception(type(m), " doesn't support dynamic kernel!")
+    return
+
+def sample_bottleneck_width(m):
+    if isinstance(m, ElasticBottleneck):
+        m.real_expansion_ratio = random.choice(m.expansion_ratio_list)
+        # print('===> real expansion ratio: ', m.real_expansion_ratio)
+    return
 
 class Model(nn.Module):
-    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, nas=False):  # model, input channels, number of classes
+    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, nas=False, nas_stage = 1):
         super(Model, self).__init__()
+        self.nas_stage = nas_stage
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
         else:  # is *.yaml
@@ -75,9 +110,6 @@ class Model(nn.Module):
             print('Overriding %s nc=%g with nc=%g' % (cfg, self.yaml['nc'], nc))
             self.yaml['nc'] = nc  # override yaml value
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch], nas_flag=nas)  # model, savelist, ch_out
-        # print('===> save: ', self.save); exit() # [4, 6, 10, 14, 18]
-        # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
-
         # Build strides, anchors
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):
@@ -95,6 +127,7 @@ class Model(nn.Module):
         print('')
 
     def forward(self, x, augment=False, profile=False):
+        # print('===> augment', augment)
         if augment:
             img_size = x.shape[-2:]  # height, width
             s = [1, 0.83, 0.67]  # scales
@@ -117,37 +150,41 @@ class Model(nn.Module):
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
         for m in self.model:
+            # Elastic setting
+            #   - dynamic depth
+            #   - dynamic kernel size
+            #   - dynamic width
+            if isinstance(m, nn.Sequential):
+                # print('===>', 'sequential length is', len(m))
+                original_depth = len(m)
+                if self.nas_stage >= 2:
+                    new_depth = random.choice(list(range(1, original_depth+1)))
+                else:
+                    new_depth = original_depth
+                new_m = []
+                for sub_m in m[:new_depth]:
+                    sample_kernel(sub_m)
+                    if self.nas_stage >= 3: sample_bottleneck_width(sub_m)
+                    new_m.append(sub_m)
+                new_m = nn.Sequential(*new_m)
+            else:
+                sample_kernel(m)
+                if self.nas_stage >= 3: sample_bottleneck_width(m)
 
-            if isinstance(m, ElasticConv):
-                m.active_kernel_size = random.choice(m.kernel_size_list)
-            elif isinstance(m, ElasticBottleneck):
-                m.cv2.active_kernel_size = random.choice(m.cv2.kernel_size_list)
-
-            if m.f != -1:  # not from(f) last layer
+            if m.f != -1:  # not from last layer, but from saved tensors
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
 
-            if profile:
-                try:
-                    import thop
-                    o = thop.profile(m, inputs=(x,), verbose=False)[0] / 1E9 * 2  # FLOPS
-                except:
-                    o = 0
-                t = time_synchronized()
-                for _ in range(10):
-                    _ = m(x)
-                dt.append((time_synchronized() - t) * 100)
-                print('%10.1f%10.0f%10.1fms %-40s' % (o, m.np, dt[-1], m.type))
-            ############ run ##########
-            x = m(x)
+            ############ forwarding a block ##########
+            if isinstance(m, nn.Sequential):
+                x = new_m(x)
+            else:
+                x = m(x)
             ############################
             y.append(x if m.i in self.save else None)  # save output
 
-        if profile:
-            print('%.1fms total' % sum(dt))
         return x
 
     def _initialize_biases(self, cf=None):  # initialize biases into Detect(), cf is class frequency
-        # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1.
         m = self.model[-1]  # Detect() module
         for mi, s in zip(m.m, m.stride):  # from
             b = mi.bias.view(m.na, -1)  # conv.bias(255) to (3,85)
@@ -160,11 +197,6 @@ class Model(nn.Module):
         for mi in m.m:  # from
             b = mi.bias.detach().view(m.na, -1).T  # conv.bias(255) to (3,85)
             print(('%6g Conv2d.bias:' + '%10.3g' * 6) % (mi.weight.shape[1], *b[:5].mean(1).tolist(), b[5:].mean()))
-
-    # def _print_weights(self):
-    #     for m in self.model.modules():
-    #         if type(m) is Bottleneck:
-    #             print('%10.3g' % (m.w.detach().sigmoid() * 2))  # shortcut weights
 
     def fuse(self):  # fuse model Conv2d() + BatchNorm2d() layers
         print('Fusing layers... ')
@@ -180,7 +212,11 @@ class Model(nn.Module):
     def info(self, verbose=False):  # print model information
         model_info(self, verbose)
 
-
+    def re_organize_middle_weights(self):
+        for m in self.model:
+            if isinstance(m, ElasticBottleneck):
+                sorted_idx = m.cv2.re_organize_middle_weights()
+                m.cv1.re_organize_middle_weights(sorted_idx)
 
 def parse_model(d, ch, nas_flag=False):  # model_dict, input_channels(3)
     logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
@@ -189,15 +225,17 @@ def parse_model(d, ch, nas_flag=False):  # model_dict, input_channels(3)
     no = na * (nc + 5)  # number of outputs = anchors * (classes + 5)
 
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
-    for i, (f, n, m, args) in enumerate(d['backbone'] + d['head']):  # from, number, module, args
-        m = eval(m) if isinstance(m, str) else m  # eval strings
+    for i, (f, n, m, args) in enumerate(d['stem'] + d['stage1'] + \
+                                        d['stage2'] + d['stage3'] + d['stage4'] + \
+                                        d['head1'] + d['head2'] + d['head3'] + d['Detect']
+                                        ):
 
+        m = eval(m) if isinstance(m, str) else m  # eval strings
         ####### add by jiangrong ###########
         if m is nn.Upsample and args[0].startswith('tuple'):
             args[0] = args[0].replace('tuple', '')
             args[0] = tuple([int(each) for each in args[0].split(',')])
         ######## end adding ################
-        
         for j, a in enumerate(args):
             try:
                 args[j] = eval(a) if isinstance(a, str) else a  # eval strings
@@ -207,25 +245,7 @@ def parse_model(d, ch, nas_flag=False):  # model_dict, input_channels(3)
         n = max(round(n * gd), 1) if n > 1 else n  # depth gain
         if m in [nn.Conv2d, Conv, Bottleneck, SPP, DWConv, MixConv2d, Focus, CrossConv, BottleneckCSP, C3, ElasticConv, ElasticBottleneck]:
             c1, c2 = ch[f], args[0]
-
-            # Normal
-            # if i > 0 and args[0] != no:  # channel expansion factor
-            #     ex = 1.75  # exponential (default 2.0)
-            #     e = math.log(c2 / ch[1]) / math.log(2)
-            #     c2 = int(ch[1] * ex ** e)
-            # if m != Focus:
-
             c2 = make_divisible(c2 * gw, 8) if c2 != no else c2
-
-            # Experimental
-            # if i > 0 and args[0] != no:  # channel expansion factor
-            #     ex = 1 + gw  # exponential (default 2.0)
-            #     ch1 = 32  # ch[1]
-            #     e = math.log(c2 / ch1) / math.log(2)  # level 1-n
-            #     c2 = int(ch1 * ex ** e)
-            # if m != Focus:
-            #     c2 = make_divisible(c2, 8) if c2 != no else c2
-
             args = [c1, c2, *args[1:]]
             if m in [BottleneckCSP, C3]:
                 args.insert(2, n)
@@ -240,7 +260,6 @@ def parse_model(d, ch, nas_flag=False):  # model_dict, input_channels(3)
                 args[1] = [list(range(args[1] * 2))] * len(f)
         else:
             c2 = ch[f]
-
         m_ = nn.Sequential(*[m(*args) for _ in range(n)]) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace('__main__.', '')  # module type
         np = sum([x.numel() for x in m_.parameters()])  # number params
@@ -250,32 +269,3 @@ def parse_model(d, ch, nas_flag=False):  # model_dict, input_channels(3)
         layers.append(m_)
         ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='yolov5s.yaml', help='model.yaml')
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    opt = parser.parse_args()
-    opt.cfg = check_file(opt.cfg)  # check file
-    set_logging()
-    device = select_device(opt.device)
-
-    # Create model
-    model = Model(opt.cfg).to(device)
-    model.train()
-
-    # Profile
-    # img = torch.rand(8 if torch.cuda.is_available() else 1, 3, 640, 640).to(device)
-    # y = model(img, profile=True)
-
-    # ONNX export
-    # model.model[-1].export = True
-    # torch.onnx.export(model, img, opt.cfg.replace('.yaml', '.onnx'), verbose=True, opset_version=11)
-
-    # Tensorboard
-    # from torch.utils.tensorboard import SummaryWriter
-    # tb_writer = SummaryWriter()
-    # print("Run 'tensorboard --logdir=models/runs' to view tensorboard at http://localhost:6006/")
-    # tb_writer.add_graph(model.model, img)  # add model to tensorboard
-    # tb_writer.add_image('test', img[0], dataformats='CWH')  # add model to tensorboard
