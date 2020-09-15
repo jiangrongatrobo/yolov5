@@ -128,8 +128,8 @@ class ElasticConv(nn.Module):
                 ks_small = self._ks_set[i]
                 ks_larger = self._ks_set[i + 1]
                 # 对卷机的参数变换, max_in * k * k
-                scale_params['conv%d_conv%d_matrix' % (ks_larger, ks_small)] = \
-                        Parameter(torch.eye(ks_small * ks_small * c1))
+                scale_params['transform_%d_%d_matrix' % (ks_larger, ks_small)] = \
+                        Parameter(torch.eye(ks_small * ks_small * c1)) # kernel shape: out x in
             for name, param in scale_params.items():
                 self.register_parameter(name, param)
 
@@ -149,9 +149,8 @@ class ElasticConv(nn.Module):
                 _input_filter = _input_filter.contiguous()
                 _input_filter = _input_filter.view(_input_filter.size(0), _input_filter.size(1), -1) # out, in, k*k
                 _input_filter = _input_filter.view(-1, _input_filter.size(1) * _input_filter.size(2)) # out, in*k*k
-                ########### TODO: re-orignize for kernel tranform ############
                 _input_filter = F.linear(
-                    _input_filter, self.__getattr__('conv%d_conv%d_matrix' % (src_ks, target_ks)),
+                    _input_filter, self.__getattr__('transform_%d_%d_matrix' % (src_ks, target_ks)),
                 )
                 _input_filter = _input_filter.view(filters.size(0), filters.size(1), target_ks ** 2) # out, in, k*k
                 _input_filter = _input_filter.view(filters.size(0), filters.size(1), target_ks, target_ks) # out, in, k, k
@@ -173,6 +172,18 @@ class ElasticConv(nn.Module):
                                         , groups=1
                                         )))
     
+    def expand_sort_index(self, sorted_index, expand_size):
+        """
+        from: sorted_index=[4,1,2,3], expand_size=3
+        to: [4*3+0, 4*3+1, 4*3+2, 1*3+0, 1*3+1, 1*3+2, 2*3+0, 2*3+1, 2*3+2, 3*3+0, 3*3+1, 3*3+2]
+        """
+        expanded_sorted_index = []
+        for index in sorted_index.detach().tolist():
+            for shift in range(expand_size):
+                expanded_sorted_index.append(index * expand_size + shift)
+        expanded_sorted_index = torch.Tensor(expanded_sorted_index)
+        return expanded_sorted_index
+
     def re_organize_middle_weights(self):
         # 对输入做sort
         # self.conv.weight.data.size(): out, in, height, weight
@@ -180,6 +191,13 @@ class ElasticConv(nn.Module):
         _, sorted_idx = torch.sort(importance, dim=0, descending=True)
         self.conv.weight.data = torch.index_select(
                                 self.conv.weight.data, 1, sorted_idx)
+        # change sort for kernel transform weights
+        if self.KERNEL_TRANSFORM_MODE:
+            for transform in self.__dict__.keys():
+                if transform.startswith('transform_'):
+                    _, src_ks, target_ks, _ = transform.split('_')
+                    self.__dict__['transform'] = torch.index_select(
+                                                self.__dict__['transform'], 1, expand_sort_index(sorted_idx))
         return sorted_idx
 
 class Conv(nn.Module):
