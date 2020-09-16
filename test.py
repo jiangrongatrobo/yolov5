@@ -1,3 +1,4 @@
+#%%
 import argparse
 import glob
 import json
@@ -17,7 +18,7 @@ from utils.general import (
     xyxy2xywh, clip_coords, plot_images, xywh2xyxy, box_iou, output_to_target, ap_per_class, set_logging)
 from utils.torch_utils import select_device, time_synchronized
 
-
+#%%
 def test(data,
          weights=None,
          batch_size=16,
@@ -293,3 +294,19 @@ if __name__ == '__main__':
             np.savetxt(f, y, fmt='%10.4g')  # save
         os.system('zip -r study.zip study_*.txt')
         # utils.general.plot_study_txt(f, x)  # plot
+
+# #%%
+# import os; os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+# # %%
+# model = attempt_load('./runs/exp5/weights/best.pt', map_location='cuda:0')
+# # %%
+# type(model.model)
+# # %%
+# type(model.model[1])
+# # %%
+# conv = model.model[1]
+# # %%
+# type(conv)
+# # %%
+# conv.__dict__
+# # %%

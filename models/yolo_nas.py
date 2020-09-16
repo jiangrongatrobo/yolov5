@@ -150,10 +150,10 @@ class Model(nn.Module):
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
         for m in self.model:
-            # Elastic setting
-            #   - dynamic depth
-            #   - dynamic kernel size
-            #   - dynamic width
+            # Elastic setting：
+            # stage 1: search kernel size
+            # stage 2: + depth
+            # stage 3: + width
             if isinstance(m, nn.Sequential):
                 # print('===>', 'sequential length is', len(m))
                 original_depth = len(m)

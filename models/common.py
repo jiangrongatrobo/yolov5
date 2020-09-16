@@ -202,12 +202,17 @@ class ElasticConv(nn.Module):
 
 class Conv(nn.Module):
     # Standard convolution
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):  # ch_in, ch_out, kernel, stride, padding, groups
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True, act_type = 'hswish'):  # ch_in, ch_out, kernel, stride, padding, groups
         super(Conv, self).__init__()
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p), groups=g, bias=False)
         self.bn = nn.BatchNorm2d(c2)
-        # self.act = nn.Hardswish() if act else nn.Identity()
-        self.act = nn.ReLU() if act else nn.Identity()
+        if act:
+            if act_type == 'hswish':
+                self.act = nn.Hardswish()
+            else:
+                self.act = nn.ReLU()
+        else:
+            self.act = nn.Identity()
 
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
@@ -242,11 +247,11 @@ class ElasticBottleneck(nn.Module):
 
 class Bottleneck(nn.Module):
     # Standard bottleneck
-    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, shortcut, groups, expansion
+    def __init__(self, c1, c2, shortcut=True, g=1, e=0.5, act_type = 'hswish'):  # ch_in, ch_out, shortcut, groups, expansion
         super(Bottleneck, self).__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_, c2, 3, 1, g=g)
+        self.cv1 = Conv(c1, c_, 1, 1, act_type = act_type)
+        self.cv2 = Conv(c_, c2, 3, 1, g=g, act_type = act_type)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
@@ -254,13 +259,13 @@ class Bottleneck(nn.Module):
 
 class BottleneckCSP(nn.Module):
     # CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5, act_type = 'hswish'):  # ch_in, ch_out, number, shortcut, groups, expansion
         super(BottleneckCSP, self).__init__()
         c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1, act_type = act_type)
         self.cv2 = nn.Conv2d(c1, c_, 1, 1, bias=False)
         self.cv3 = nn.Conv2d(c_, c_, 1, 1, bias=False)
-        self.cv4 = Conv(2 * c_, c2, 1, 1)
+        self.cv4 = Conv(2 * c_, c2, 1, 1, act_type = act_type)
         self.bn = nn.BatchNorm2d(2 * c_)  # applied to cat(cv2, cv3)
         self.act = nn.LeakyReLU(0.1, inplace=True)
         self.m = nn.Sequential(*[Bottleneck(c_, c_, shortcut, g, e=1.0) for _ in range(n)])
@@ -272,11 +277,11 @@ class BottleneckCSP(nn.Module):
 
 class SPP(nn.Module):
     # Spatial pyramid pooling layer used in YOLOv3-SPP
-    def __init__(self, c1, c2, k=(5, 9, 13)):
+    def __init__(self, c1, c2, k=(5, 9, 13), act_type = 'hswish'):
         super(SPP, self).__init__()
         c_ = c1 // 2  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_ * (len(k) + 1), c2, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1, act_type = act_type)
+        self.cv2 = Conv(c_ * (len(k) + 1), c2, 1, 1, act_type = act_type)
         self.m = nn.ModuleList([nn.MaxPool2d(kernel_size=x, stride=1, padding=x // 2) for x in k])
 
     def forward(self, x):
@@ -285,9 +290,9 @@ class SPP(nn.Module):
 
 class Focus(nn.Module):
     # Focus wh information into c-space
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):  # ch_in, ch_out, kernel, stride, padding, groups
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True, act_type = 'hswish'):  # ch_in, ch_out, kernel, stride, padding, groups
         super(Focus, self).__init__()
-        self.conv = Conv(c1 * 4, c2, k, s, p, g, act)
+        self.conv = Conv(c1 * 4, c2, k, s, p, g, act, act_type = act_type)
 
     def forward(self, x):  # x(b,c,w,h) -> y(b,4c,w/2,h/2)
         return self.conv(torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1))

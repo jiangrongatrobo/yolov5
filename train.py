@@ -391,7 +391,7 @@ if __name__ == '__main__':
     parser.add_argument('--cfg', type=str, default='models/yolov5s-roborock.yaml', help='model.yaml path')
     parser.add_argument('--data', type=str, default='data/baiguang.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='', help='hyperparameters path, i.e. data/hyp.scratch.yaml')
-    parser.add_argument('--epochs', type=int, default=300)
+    parser.add_argument('--epochs', type=int, default=200)
     parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='train,test sizes')
     parser.add_argument('--rect', action='store_true', help='rectangular training')
@@ -440,7 +440,7 @@ if __name__ == '__main__':
         assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
         opt.img_size.extend([opt.img_size[-1]] * (2 - len(opt.img_size)))  # extend to 2 sizes (train, test)
         log_dir = increment_dir(Path(opt.logdir) / 'exp', opt.name)  # runs/exp1
-
+    print("===> ", "The experiment assets are saved to ", log_dir)
     device = select_device(opt.device, batch_size=opt.batch_size)
 
     # DDP mode
