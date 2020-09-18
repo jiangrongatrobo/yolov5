@@ -550,7 +550,7 @@ def build_targets(p, targets, model):
 
     for i in range(det.nl):
         anchors = det.anchors[i]
-        gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
+        gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain, grid map widht and height
 
         # Match targets to anchors
         t = targets * gain

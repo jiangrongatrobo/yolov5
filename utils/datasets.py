@@ -494,7 +494,6 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 r = np.random.beta(8.0, 8.0)  # mixup ratio, alpha=beta=8.0
                 img = (img * r + img2 * (1 - r)).astype(np.uint8)
                 labels = np.concatenate((labels, labels2), 0)
-
         else:
             # Load image
             img, (h0, w0), (h, w) = load_image(self, index)

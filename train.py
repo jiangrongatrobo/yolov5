@@ -7,6 +7,7 @@ import random
 import shutil
 import time
 from pathlib import Path
+import cv2
 
 import numpy as np
 import torch.distributed as dist
@@ -27,12 +28,29 @@ from utils.datasets import create_dataloader
 from utils.general import (
     torch_distributed_zero_first, labels_to_class_weights, plot_labels, check_anchors, labels_to_image_weights,
     compute_loss, plot_images, fitness, strip_optimizer, plot_results, get_latest_run, check_dataset, check_file,
-    check_git_status, check_img_size, increment_dir, print_mutation, plot_evolution, set_logging)
+    check_git_status, check_img_size, increment_dir, print_mutation, plot_evolution, set_logging, non_max_suppression, scale_coords)
 from utils.google_utils import attempt_download
 from utils.torch_utils import init_seeds, ModelEMA, select_device, intersect_dicts
 
 logger = logging.getLogger(__name__)
 
+def teacher2targets(t_pred, t_imgs):
+    tgts = []
+    for i, (det, img) in enumerate(zip(t_pred, t_imgs.detach().cpu().numpy())):
+        if det is not None:
+            for each_b in det.detach().cpu().numpy():
+                x0,y0,x1,y1,score,class_id = each_b
+                x0,y0,x1,y1,score,class_id = float(x0),float(y0),float(x1),float(y1),float(score),float(class_id)
+                c_x = (x0 + x1) / 2.0
+                c_y = (y0 + y1) / 2.0
+                c_w = (x1 - x0) 
+                c_h = (y1 - y0)
+                c_x /= img.shape[2] # img format: c,h,w
+                c_w /= img.shape[2]
+                c_y /= img.shape[1]
+                c_h /= img.shape[1]
+                tgts.append([float(i), class_id, c_x, c_y, c_w, c_h])
+    return torch.Tensor(np.array(tgts)) if len(tgts) > 0 else torch.Tensor(0,6)
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(f'Hyperparameters {hyp}')
@@ -69,7 +87,10 @@ def train(hyp, opt, device, tb_writer=None):
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
-        model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc).to(device)  # create
+        if opt.nas:
+            model = NasModel(opt.cfg, ch=3, nc=nc, nas=opt.nas, nas_stage=opt.nas_stage).to(device)  # create
+        else:
+            model = Model(opt.cfg or ckpt['model'].yaml, ch=3, nc=nc).to(device)  # create
         exclude = ['anchor'] if opt.cfg else []  # exclude keys
         state_dict = ckpt['model'].float().state_dict()  # to FP32
         state_dict = intersect_dicts(state_dict, model.state_dict(), exclude=exclude)  # intersect
@@ -79,10 +100,24 @@ def train(hyp, opt, device, tb_writer=None):
         if opt.nas:
             model = NasModel(opt.cfg, ch=3, nc=nc, nas=opt.nas, nas_stage=opt.nas_stage).to(device)  # create
             if opt.nas_stage == 3:
+                # TODO
                 model.re_organize_middle_weights()
         else:
-            model = Model(opt.cfg, ch=3, nc=nc, nas=opt.nas).to(device)  # create
+            model = Model(opt.cfg, ch=3, nc=nc).to(device)  # create
 
+    if opt.nas and opt.nas_stage > 0:
+        from models.experimental import attempt_load
+        """
+            P           R           mAP@.5
+            0.535       0.835       0.742
+            python test.py \
+                --weights /workspace/yolov5-v3/yolov5/runs/exp122/weights/best.pt \
+                --data ./data/baiguang.yaml \
+                --device 1 \
+                --conf-thres 0.2
+        """
+        teacher_model = attempt_load("/workspace/yolov5-v3/yolov5/runs/exp122/weights/best.pt", map_location='cuda:1')
+        teacher_model.eval()
     # Freeze
     freeze = ['', ]  # parameter names to freeze (full or partial)
     if any(freeze):
@@ -152,7 +187,11 @@ def train(hyp, opt, device, tb_writer=None):
     imgsz, imgsz_test = [check_img_size(x, gs) for x in opt.img_size]  # verify imgsz are gs-multiples
 
     # DP mode
-    if cuda and rank == -1 and torch.cuda.device_count() > 1:
+    # TheModel = model
+    if cuda and rank == -1 and torch.cuda.device_count() > 1 and not (opt.nas and opt.nas_stage > 0):
+        # https://pytorch.org/docs/stable/generated/torch.nn.DataParallel.html
+        # >>> net = torch.nn.DataParallel(model, device_ids=[0, 1, 2])
+        # >>> output = net(input_var)  # input_var can be on any device, including CPU
         model = torch.nn.DataParallel(model)
 
     # SyncBatchNorm
@@ -217,6 +256,7 @@ def train(hyp, opt, device, tb_writer=None):
     logger.info('Using %g dataloader workers' % dataloader.num_workers)
     logger.info('Starting training for %g epochs...' % epochs)
     # torch.autograd.set_detect_anomaly(True)
+    plot_csum = 0
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
         model.train()
 
@@ -250,6 +290,8 @@ def train(hyp, opt, device, tb_writer=None):
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
         for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+            # print(type(targets), targets.size()) #  [[_,classid(start from 0), x,y,w,h (0-1)]]
+            # print('---> targets: ', targets)
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
@@ -274,11 +316,77 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Forward
             with amp.autocast(enabled=cuda):
-                pred = model(imgs)  # forward
+                pred = model(imgs)  # forward, format x(bs,3,20,20,80+1+4)
                 loss, loss_items = compute_loss(pred, targets.to(device), model)  # loss scaled by batch_size
                 if rank != -1:
                     loss *= opt.world_size  # gradient averaged between devices in DDP mode
+                # z= []
+                # for i in range(TheModel._modules['model'][-1].nl):
+                #     bs, _, ny, nx, _ = pred[i].shape
+                #     if TheModel._modules['model'][-1].grid[i].shape[2:4] != pred[i].shape[2:4]:
+                #         TheModel._modules['model'][-1].grid[i] = TheModel._modules['model'][-1]._make_grid(nx, ny).to(pred[i].device)
 
+                #     y = pred[i].sigmoid()
+                #     y[..., 0:2] = (y[..., 0:2] * 2. - 0.5 + TheModel._modules['model'][-1].grid[i].to(pred[i].device)) * TheModel._modules['model'][-1].stride[i]  # xy
+                #     y[..., 2:4] = (y[..., 2:4] * 2) ** 2 * TheModel._modules['model'][-1].anchor_grid[i]  # wh
+                #     z.append(y.view(bs, -1, TheModel._modules['model'][-1].no))
+                # inf_out = torch.cat(z, 1)
+                # teacher_pred = non_max_suppression(inf_out, conf_thres=0.2, iou_thres=0.6, merge=False)
+                # assert len(teacher_pred) == imgs.size()[0]
+                # for i, (det, plot_img) in enumerate(zip(teacher_pred, imgs.detach().cpu().numpy())):
+                #     plot_img = np.transpose(plot_img, (1,2,0))
+                #     plot_img = np.uint8(plot_img * 255.0)
+                #     plot_csum += 1
+                #     cv2.imwrite('./tmp/{}.jpg'.format(plot_csum), plot_img)
+                #     plot_img = cv2.imread('./tmp/{}.jpg'.format(plot_csum))
+                #     for tgt in targets.detach().cpu().numpy():
+                #         _, tgt_class_id, c_x, c_y, c_w, c_h = tgt
+                #         c_x, c_y, c_w, c_h = float(c_x), float(c_y), float(c_w), float(c_h)
+                #         c_x, c_y, c_w, c_h = c_x * plot_img.shape[1], c_y * plot_img.shape[0], c_w * plot_img.shape[1], c_h * plot_img.shape[0]
+                #         cv2.rectangle(plot_img, (int(c_x - c_w / 2), int(c_y - c_h / 2)), (int(c_x + c_w / 2), int(c_y + c_h / 2)), (0,0,255), 2)
+                #         print('===> ', int(c_x - c_w / 2), int(c_y - c_h / 2), int(c_x + c_w / 2), int(c_y + c_h / 2), tgt_class_id)
+                #     if det is not None:
+                #         det = det.detach().cpu().numpy()
+                #         for each_b in det:
+                #             pass
+                #             cv2.rectangle(plot_img, (int(each_b[0]), int(each_b[1])), (int(each_b[2]), int(each_b[3])), (255,0,0), 2)
+                #             print('---> ', int(each_b[0]), int(each_b[1]), int(each_b[2]), int(each_b[3]), float(each_b[4]), int(each_b[5]))
+                #     cv2.imwrite('./tmp/{}.jpg'.format(plot_csum), plot_img)
+
+            if opt.nas and opt.nas_stage > 0:
+                teacher_imgs = imgs.to('cuda:1')
+                with torch.no_grad():
+                    inf_out, train_out = teacher_model(teacher_imgs)  # forward
+                    teacher_pred = non_max_suppression(inf_out, conf_thres=0.2, iou_thres=0.6, merge=False) # (x1, y1, x2, y2, conf, cls) in resized image size
+                    teacher_targets = teacher2targets(teacher_pred, teacher_imgs)
+                    # print('---> teacher_pred', teacher_pred)
+                    # print('---> targets', targets)
+                    # print('---> teacher_targets', teacher_targets)
+                    # TODO: apply soft label loss
+                    teacher_loss, teacher_loss_items = compute_loss(pred, teacher_targets.to(device), model)  # loss scaled by batch_size
+                    loss += teacher_loss
+                    loss_items += teacher_loss_items
+                    ########## the targets and teacher predictions are matched, but they both can not be restored to the image, need TODO!! ###########
+                    # assert len(teacher_pred) == imgs.size()[0]
+                    # for i, (det, plot_img) in enumerate(zip(teacher_pred, imgs.detach().cpu().numpy())):
+                    #     plot_img = np.transpose(plot_img, (1,2,0))
+                    #     plot_img = np.uint8(plot_img * 255.0)
+                    #     plot_csum += 1
+                    #     cv2.imwrite('./tmp/{}.jpg'.format(plot_csum), plot_img)
+                    #     plot_img = cv2.imread('./tmp/{}.jpg'.format(plot_csum))
+                    #     for tgt in targets.detach().cpu().numpy():
+                    #         _, tgt_class_id, c_x, c_y, c_w, c_h = tgt
+                    #         c_x, c_y, c_w, c_h = float(c_x), float(c_y), float(c_w), float(c_h)
+                    #         c_x, c_y, c_w, c_h = c_x * plot_img.shape[1], c_y * plot_img.shape[0], c_w * plot_img.shape[1], c_h * plot_img.shape[0]
+                    #         cv2.rectangle(plot_img, (int(c_x - c_w / 2), int(c_y - c_h / 2)), (int(c_x + c_w / 2), int(c_y + c_h / 2)), (0,0,255), 2)
+                    #         print('===> ', int(c_x - c_w / 2), int(c_y - c_h / 2), int(c_x + c_w / 2), int(c_y + c_h / 2), tgt_class_id)
+                    #     if det is not None:
+                    #         det = det.detach().cpu().numpy()
+                    #         for each_b in det:
+                    #             pass
+                    #             cv2.rectangle(plot_img, (int(each_b[0]), int(each_b[1])), (int(each_b[2]), int(each_b[3])), (255,0,0), 2)
+                    #             print('---> ', int(each_b[0]), int(each_b[1]), int(each_b[2]), int(each_b[3]), float(each_b[4]), int(each_b[5]))
+                    #     cv2.imwrite('./tmp/{}.jpg'.format(plot_csum), plot_img)
             # Backward
             scaler.scale(loss).backward()
 
@@ -415,7 +523,8 @@ if __name__ == '__main__':
     parser.add_argument('--nas', action='store_true', help='neural architecture search')
     parser.add_argument('--nas-stage', type=int, default=1, help='1: +kernel, 2: +depth, 3: +width')
     opt = parser.parse_args()
-
+    if opt.nas and opt.nas_stage > 0:
+        assert len(opt.device.split(',')) > 1, "There must be at least two gpus for NAS, one gpu is for student model, another is for teacher model"
     # Set DDP variables
     opt.total_batch_size = opt.batch_size
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
@@ -540,3 +649,4 @@ if __name__ == '__main__':
         plot_evolution(yaml_file)
         print('Hyperparameter evolution complete. Best results saved as: %s\nCommand to train a new model with these '
               'hyperparameters: $ python train.py --hyp %s' % (yaml_file, yaml_file))
+

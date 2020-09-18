@@ -39,7 +39,7 @@ class Detect(nn.Module):
         self.training |= self.export
         for i in range(self.nl):
             x[i] = self.m[i](x[i])  # conv
-            bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,85)
+            bs, _, ny, nx = x[i].shape  # x(bs,255,20,20) to x(bs,3,20,20,80+1+4)
             x[i] = x[i].view(bs, self.na, self.no, ny, nx).permute(0, 1, 3, 4, 2).contiguous()
 
             if not self.training:  # inference
@@ -60,7 +60,7 @@ class Detect(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, nas=False):  # model, input channels, number of classes
+    def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None):  # model, input channels, number of classes
         super(Model, self).__init__()
         if isinstance(cfg, dict):
             self.yaml = cfg  # model dict
@@ -74,7 +74,7 @@ class Model(nn.Module):
         if nc and nc != self.yaml['nc']:
             print('Overriding %s nc=%g with nc=%g' % (cfg, self.yaml['nc'], nc))
             self.yaml['nc'] = nc  # override yaml value
-        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch], nas_flag=nas)  # model, savelist, ch_out
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=[ch])  # model, savelist, ch_out
         # print('===> save: ', self.save); exit() # [4, 6, 10, 14, 18]
         # print([x.shape for x in self.forward(torch.zeros(1, ch, 64, 64))])
 
@@ -117,7 +117,6 @@ class Model(nn.Module):
     def forward_once(self, x, profile=False):
         y, dt = [], []  # outputs
         for m in self.model:
-
             if isinstance(m, ElasticConv):
                 m.active_kernel_size = random.choice(m.kernel_size_list)
             elif isinstance(m, ElasticBottleneck):
@@ -182,7 +181,7 @@ class Model(nn.Module):
 
 
 
-def parse_model(d, ch, nas_flag=False):  # model_dict, input_channels(3)
+def parse_model(d, ch):  # model_dict, input_channels(3)
     logger.info('\n%3s%18s%3s%10s  %-40s%-30s' % ('', 'from', 'n', 'params', 'module', 'arguments'))
     anchors, nc, gd, gw = d['anchors'], d['nc'], d['depth_multiple'], d['width_multiple']
     na = (len(anchors[0]) // 2) if isinstance(anchors, list) else anchors  # number of anchors

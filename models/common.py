@@ -69,14 +69,21 @@ class DynamicBatchNorm2d(nn.Module):
 
 class ElasticPointConv(nn.Module):
     # by jiangrong
-    def __init__(self, c1, c2, act=True):  # ch_in, ch_out, kernel, stride, padding, groups
+    def __init__(self, c1, c2, act=True, act_type = 'hswish'):  # ch_in, ch_out, kernel, stride, padding, groups
         super(ElasticPointConv, self).__init__()
         self.max_out_channel = c2
         self.in_channel = c1
         self.conv = nn.Conv2d(self.in_channel, self.max_out_channel
                             , 1, 0, 0, groups=1, bias=False)
         self.bn = DynamicBatchNorm2d(self.max_out_channel)
-        self.act = nn.ReLU() if act else nn.Identity()
+        # self.act = nn.ReLU() if act else nn.Identity()
+        if act:
+            if act_type == 'hswish':
+                self.act = nn.Hardswish()
+            else:
+                self.act = nn.ReLU()
+        else:
+            self.act = nn.Identity()
         self.real_output_channel = self.max_out_channel
 
     def forward(self, x):
@@ -100,7 +107,7 @@ class ElasticPointConv(nn.Module):
 class ElasticConv(nn.Module):
     # by jiangrong
     KERNEL_TRANSFORM_MODE = 1
-    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True):  # ch_in, ch_out, kernel, stride, padding, groups
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, act=True, act_type = 'hswish'):  # ch_in, ch_out, kernel, stride, padding, groups
         super(ElasticConv, self).__init__()
         self.kernel_size_list = k
         # for dynamic kernel size
@@ -117,7 +124,15 @@ class ElasticConv(nn.Module):
                             , autopad(self.max_kernel_size, self.padding)
                         , groups=1, bias=False)
         self.bn = nn.BatchNorm2d(self.output_channel)
-        self.act = nn.ReLU() if act else nn.Identity()
+        # self.act = nn.ReLU() if act else nn.Identity()
+        if act:
+            if act_type == 'hswish':
+                self.act = nn.Hardswish()
+            else:
+                self.act = nn.ReLU()
+        else:
+            self.act = nn.Identity()
+
         self._ks_set = list(set(self.kernel_size_list))
         self._ks_set.sort()  # e.g., [3, 5, 7]
         if self.KERNEL_TRANSFORM_MODE is not None:
@@ -222,7 +237,7 @@ class Conv(nn.Module):
 
 class ElasticBottleneck(nn.Module):
     # Standard bottleneck
-    def __init__(self, c1, c2, shortcut=True, k=[3,5], e=[0.3, 0.5, 0.7], g=1): # ch_in, ch_out, shortcut, groups, expansion
+    def __init__(self, c1, c2, shortcut=True, k=[3,5], e=[0.3, 0.5, 0.7], g=1, act_type = 'hswish'): # ch_in, ch_out, shortcut, groups, expansion
         super(ElasticBottleneck, self).__init__()
         self.input_channel = c1
         self.output_channel = c2
@@ -231,8 +246,9 @@ class ElasticBottleneck(nn.Module):
         self.real_expansion_ratio = self.max_expansion_ratio
         self.max_mid_channel = int(self.output_channel * self.max_expansion_ratio)  # hidden channels
         self.kernel_size_list = k
-        self.cv1 = ElasticPointConv(self.input_channel, self.max_mid_channel, True)
-        self.cv2 = ElasticConv(self.max_mid_channel, self.output_channel, self.kernel_size_list, 1)
+        self.cv1 = ElasticPointConv(self.input_channel, self.max_mid_channel, True, act_type = act_type)
+        self.cv2 = ElasticConv(self.max_mid_channel, self.output_channel, self.kernel_size_list, 1
+                                ,p=None, g=1, act=True, act_type = act_type)
         self.add = shortcut and self.input_channel == self.output_channel
 
     def forward(self, x):

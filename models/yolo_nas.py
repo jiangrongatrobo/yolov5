@@ -151,25 +151,30 @@ class Model(nn.Module):
         y, dt = [], []  # outputs
         for m in self.model:
             # Elastic setting：
+            # stage 0: pretrain super net
             # stage 1: search kernel size
             # stage 2: + depth
             # stage 3: + width
             if isinstance(m, nn.Sequential):
                 # print('===>', 'sequential length is', len(m))
                 original_depth = len(m)
-                if self.nas_stage >= 2:
+                if self.nas_stage > 1:
                     new_depth = random.choice(list(range(1, original_depth+1)))
                 else:
                     new_depth = original_depth
                 new_m = []
                 for sub_m in m[:new_depth]:
-                    sample_kernel(sub_m)
-                    if self.nas_stage >= 3: sample_bottleneck_width(sub_m)
+                    if self.nas_stage > 0:
+                        sample_kernel(sub_m)
+                    if self.nas_stage > 2:
+                        sample_bottleneck_width(sub_m)
                     new_m.append(sub_m)
                 new_m = nn.Sequential(*new_m)
             else:
-                sample_kernel(m)
-                if self.nas_stage >= 3: sample_bottleneck_width(m)
+                if self.nas_stage > 0:
+                    sample_kernel(m)
+                if self.nas_stage >2: 
+                    sample_bottleneck_width(m)
 
             if m.f != -1:  # not from last layer, but from saved tensors
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
