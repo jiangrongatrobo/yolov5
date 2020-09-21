@@ -58,21 +58,6 @@ class Detect(nn.Module):
         yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
         return torch.stack((xv, yv), 2).view((1, 1, ny, nx, 2)).float()
 
-class baseModel(nn.Module):
-    def __init__(self, backbone, neck, head1, head2, head3):
-        self.backbone = backbone
-        self.neck = neck
-        self.head1 = head1
-        self.head2 = head2
-        self.head3 = head3
-
-    def forward(self, x):
-        x = self.backbone(x)
-        x = self.neck(x)
-        h1 = self.head1(x)
-        h2 = self.head2(x)
-        h3 = self.head3(x)
-        return (h1,h2,h3)
 
 def sample_kernel(m):
     if isinstance(m, ElasticConv):

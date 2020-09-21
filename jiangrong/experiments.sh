@@ -50,8 +50,15 @@ nohup python -u train.py \
 --batch-size 32 \
 --device 0,1 > logs/yolov5s-roborock-training.log 2>&1 &
 
-###############################################
-python train.py \
+# mAP@50: 0.717
+python test.py \
+--weights /workspace/yolov5-v3/yolov5/runs/exp244/weights/best.pt \
+--data ./data/baiguang.yaml \
+--device 1 \
+--conf-thres 0.2
+
+##################### Once For All ##########################
+nohup python -u train.py \
 --cfg ./models/yolov5-roborock-nas.yaml \
 --data ./data/coco.yaml \
 --device 0,1 \
@@ -59,9 +66,10 @@ python train.py \
 --epochs 200 \
 --batch-size 16 \
 --nas \
---nas-stage 0
+--nas-stage 0 > logs/roborock-nas-stage0-pretraining.log 2>&1 &
 
-python train.py \
+nohup python -u train.py \
+--weights ./runs/exp245/weights/best.pt \
 --cfg ./models/yolov5-roborock-nas.yaml \
 --data ./data/baiguang.yaml \
 --device 0,1 \
@@ -69,7 +77,7 @@ python train.py \
 --epochs 200 \
 --batch-size 16 \
 --nas \
---nas-stage 0
+--nas-stage 0 > logs/roborock-nas-stage0.log 2>&1 &
 
 python train.py \
 --cfg ./models/yolov5-roborock-nas.yaml \
@@ -83,10 +91,6 @@ python train.py \
 --nas-stage 1
 
 ###############################################
-
-
-
-
 
 nohup python -u train.py \
 --weights weights/yolov5m.pt \

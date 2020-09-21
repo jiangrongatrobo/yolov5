@@ -87,6 +87,9 @@ def train(hyp, opt, device, tb_writer=None):
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
+        # added by jiangrong
+        if not opt.resume:
+            ckpt['epoch'] = -1
         if opt.nas:
             model = NasModel(opt.cfg, ch=3, nc=nc, nas=opt.nas, nas_stage=opt.nas_stage).to(device)  # create
         else:
@@ -100,7 +103,7 @@ def train(hyp, opt, device, tb_writer=None):
         if opt.nas:
             model = NasModel(opt.cfg, ch=3, nc=nc, nas=opt.nas, nas_stage=opt.nas_stage).to(device)  # create
             if opt.nas_stage == 3:
-                # TODO
+                # TODO, Remapping with BN Statistics on Width-level
                 model.re_organize_middle_weights()
         else:
             model = Model(opt.cfg, ch=3, nc=nc).to(device)  # create
@@ -161,7 +164,7 @@ def train(hyp, opt, device, tb_writer=None):
     start_epoch, best_fitness = 0, 0.0
     if pretrained:
         # Optimizer
-        if ckpt['optimizer'] is not None:
+        if ckpt['optimizer'] is not None and opt.nas_stage > 0:
             optimizer.load_state_dict(ckpt['optimizer'])
             best_fitness = ckpt['best_fitness']
 
@@ -427,6 +430,9 @@ def train(hyp, opt, device, tb_writer=None):
                 ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride'])
             final_epoch = epoch + 1 == epochs
             if not opt.notest or final_epoch:  # Calculate mAP
+                if opt.nas:
+                    # only evaluate the super network
+                    ema.ema.nas_stage = 0
                 results, maps, times = test.test(opt.data,
                                                  batch_size=total_batch_size,
                                                  imgsz=imgsz_test,
@@ -434,6 +440,8 @@ def train(hyp, opt, device, tb_writer=None):
                                                  single_cls=opt.single_cls,
                                                  dataloader=testloader,
                                                  save_dir=log_dir)
+                if opt.nas:
+                    ema.ema.nas_stage = opt.nas_stage
 
             # Write
             with open(results_file, 'a') as f:
