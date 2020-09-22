@@ -16,7 +16,7 @@ import torch.optim as optim
 import torch.optim.lr_scheduler as lr_scheduler
 import torch.utils.data
 import yaml
-from torch.cuda import amp
+# from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -27,8 +27,8 @@ from models.yolo_nas import Model as NasModel
 from utils.datasets import create_dataloader
 from utils.general import (
     torch_distributed_zero_first, labels_to_class_weights, plot_labels, check_anchors, labels_to_image_weights,
-    compute_loss, plot_images, fitness, strip_optimizer, plot_results, get_latest_run, check_dataset, check_file,
-    check_git_status, check_img_size, increment_dir, print_mutation, plot_evolution, set_logging, non_max_suppression, scale_coords)
+    compute_loss, compute_teacher_loss, plot_images, fitness, strip_optimizer, plot_results, get_latest_run, check_dataset, check_file,
+    check_git_status, check_img_size, increment_dir, print_mutation, plot_evolution, set_logging, non_max_suppression, non_max_suppression_teacher, scale_coords)
 from utils.google_utils import attempt_download
 from utils.torch_utils import init_seeds, ModelEMA, select_device, intersect_dicts
 
@@ -39,8 +39,8 @@ def teacher2targets(t_pred, t_imgs):
     for i, (det, img) in enumerate(zip(t_pred, t_imgs.detach().cpu().numpy())):
         if det is not None:
             for each_b in det.detach().cpu().numpy():
-                x0,y0,x1,y1,score,class_id = each_b
-                x0,y0,x1,y1,score,class_id = float(x0),float(y0),float(x1),float(y1),float(score),float(class_id)
+                x0,y0,x1,y1,cls_score,class_id,obj_score = each_b
+                x0,y0,x1,y1,cls_score,class_id,obj_score = float(x0),float(y0),float(x1),float(y1),float(cls_score),float(class_id),float(obj_score)
                 c_x = (x0 + x1) / 2.0
                 c_y = (y0 + y1) / 2.0
                 c_w = (x1 - x0) 
@@ -49,8 +49,8 @@ def teacher2targets(t_pred, t_imgs):
                 c_w /= img.shape[2]
                 c_y /= img.shape[1]
                 c_h /= img.shape[1]
-                tgts.append([float(i), class_id, c_x, c_y, c_w, c_h])
-    return torch.Tensor(np.array(tgts)) if len(tgts) > 0 else torch.Tensor(0,6)
+                tgts.append([float(i), class_id, c_x, c_y, c_w, c_h, obj_score, cls_score])
+    return torch.Tensor(np.array(tgts)) if len(tgts) > 0 else torch.Tensor(0,8)
 
 def train(hyp, opt, device, tb_writer=None):
     logger.info(f'Hyperparameters {hyp}')
@@ -119,7 +119,7 @@ def train(hyp, opt, device, tb_writer=None):
                 --device 1 \
                 --conf-thres 0.2
         """
-        teacher_model = attempt_load("/workspace/yolov5-v3/yolov5/runs/exp122/weights/best.pt", map_location='cuda:1')
+        teacher_model = attempt_load("/workspace/yolov5-v3/yolov5/runs/exp259/weights/best.pt", map_location='cuda:1')
         teacher_model.eval()
     # Freeze
     freeze = ['', ]  # parameter names to freeze (full or partial)
@@ -164,7 +164,7 @@ def train(hyp, opt, device, tb_writer=None):
     start_epoch, best_fitness = 0, 0.0
     if pretrained:
         # Optimizer
-        if ckpt['optimizer'] is not None and opt.nas_stage > 0:
+        if ckpt['optimizer'] is not None and not opt.nas > 0:
             optimizer.load_state_dict(ckpt['optimizer'])
             best_fitness = ckpt['best_fitness']
 
@@ -254,7 +254,7 @@ def train(hyp, opt, device, tb_writer=None):
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # 'P', 'R', 'mAP', 'F1', 'val GIoU', 'val Objectness', 'val Classification'
     scheduler.last_epoch = start_epoch - 1  # do not move
-    scaler = amp.GradScaler(enabled=cuda)
+    # scaler = amp.GradScaler(enabled=cuda)
     logger.info('Image sizes %g train, %g test' % (imgsz, imgsz_test))
     logger.info('Using %g dataloader workers' % dataloader.num_workers)
     logger.info('Starting training for %g epochs...' % epochs)
@@ -318,7 +318,9 @@ def train(hyp, opt, device, tb_writer=None):
                     imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
             # Forward
-            with amp.autocast(enabled=cuda):
+            ###### jiangrong, turn off mixed precision ##########
+            # with amp.autocast(enabled=cuda):
+            if 1 == 1:
                 pred = model(imgs)  # forward, format x(bs,3,20,20,80+1+4)
                 loss, loss_items = compute_loss(pred, targets.to(device), model)  # loss scaled by batch_size
                 if rank != -1:
@@ -359,16 +361,20 @@ def train(hyp, opt, device, tb_writer=None):
             if opt.nas and opt.nas_stage > 0:
                 teacher_imgs = imgs.to('cuda:1')
                 with torch.no_grad():
-                    inf_out, train_out = teacher_model(teacher_imgs)  # forward
-                    teacher_pred = non_max_suppression(inf_out, conf_thres=0.2, iou_thres=0.6, merge=False) # (x1, y1, x2, y2, conf, cls) in resized image size
+                    inf_out, _ = teacher_model(teacher_imgs)  # forward
+                    # filter by obj confidence 0.05
+                    teacher_pred = non_max_suppression_teacher(inf_out, conf_thres=0.05, iou_thres=0.6, merge=False) # (x1, y1, x2, y2, conf, cls) in resized image size
                     teacher_targets = teacher2targets(teacher_pred, teacher_imgs)
                     # print('---> teacher_pred', teacher_pred)
                     # print('---> targets', targets)
                     # print('---> teacher_targets', teacher_targets)
                     # TODO: apply soft label loss
-                    teacher_loss, teacher_loss_items = compute_loss(pred, teacher_targets.to(device), model)  # loss scaled by batch_size
-                    loss += teacher_loss
-                    loss_items += teacher_loss_items
+                    teacher_loss, teacher_loss_items = compute_teacher_loss(pred, teacher_targets.to(device), model)  # loss scaled by batch_size
+                    # print("===> origin loss", loss, loss_items)
+                    # print("===> teacher loss", teacher_loss, teacher_loss_items)
+                    teacher_loss_scale = 2.0
+                    loss += teacher_loss * teacher_loss_scale
+                    loss_items += teacher_loss_items * teacher_loss_scale
                     ########## the targets and teacher predictions are matched, but they both can not be restored to the image, need TODO!! ###########
                     # assert len(teacher_pred) == imgs.size()[0]
                     # for i, (det, plot_img) in enumerate(zip(teacher_pred, imgs.detach().cpu().numpy())):
@@ -391,12 +397,14 @@ def train(hyp, opt, device, tb_writer=None):
                     #             print('---> ', int(each_b[0]), int(each_b[1]), int(each_b[2]), int(each_b[3]), float(each_b[4]), int(each_b[5]))
                     #     cv2.imwrite('./tmp/{}.jpg'.format(plot_csum), plot_img)
             # Backward
-            scaler.scale(loss).backward()
+            # scaler.scale(loss).backward()
+            loss.backward()
 
             # Optimize
             if ni % accumulate == 0:
-                scaler.step(optimizer)  # optimizer.step
-                scaler.update()
+                # scaler.step(optimizer)  # optimizer.step
+                # scaler.update()
+                optimizer.step()
                 optimizer.zero_grad()
                 if ema:
                     ema.update(model)

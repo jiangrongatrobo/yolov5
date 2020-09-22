@@ -103,7 +103,6 @@ class ElasticPointConv(nn.Module):
         adjust_bn_according_to_idx(self.bn, sorted_idx)
         return
 
-
 class ElasticConv(nn.Module):
     # by jiangrong
     KERNEL_TRANSFORM_MODE = 1

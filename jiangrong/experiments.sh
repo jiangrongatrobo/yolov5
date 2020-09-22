@@ -79,16 +79,24 @@ nohup python -u train.py \
 --nas \
 --nas-stage 0 > logs/roborock-nas-stage0.log 2>&1 &
 
-python train.py \
+# 0.774 @ mAP50
+python test.py \
+--weights /workspace/yolov5-v3/yolov5/runs/exp259/weights/best.pt \
+--data ./data/baiguang.yaml \
+--device 0
+
+# init from coco or stage0
+nohup python -u train.py \
+--hyp ./data/hyp.nas.yaml \
 --cfg ./models/yolov5-roborock-nas.yaml \
 --data ./data/baiguang.yaml \
---weights ./runs/exp241/weights/last.pt \
+--weights /workspace/yolov5-v3/yolov5/runs/exp259/weights/best.pt \
 --device 0,1 \
---workers 16 \
---epochs 200 \
---batch-size 4 \
+--workers 12 \
+--epochs 300 \
+--batch-size 8 \
 --nas \
---nas-stage 1
+--nas-stage 1 > logs/roborock-nas-stage1.log 2>&1 &
 
 ###############################################
 
